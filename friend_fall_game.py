@@ -1,180 +1,156 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Sat Mar 29 13:00:34 2025
+Created on Sat Mar 29 15:20:48 2025
 
 @author: tsuji
 """
 
-from IPython.display import display, HTML
+import os
+import random
+import pygame
+import pymunk
 
-display(HTML('''
-<div>
-  <canvas id="gameCanvas" width="300" height="500" style="border:1px solid black;"></canvas>
-  <p>Player: <span id="currentPlayer">1</span></p>
-  <p>Player 1 Score: <span id="score1">0</span> / Player 2 Score: <span id="score2">0</span></p>
-</div>
+# --- 初期化 ---
+pygame.init()
+screen = pygame.display.set_mode((400, 600))
+clock = pygame.time.Clock()
 
-<script>
-  const canvas = document.getElementById('gameCanvas');
-  const ctx = canvas.getContext('2d');
-  const gridSize = 60;
-  const moveStep = 10;  // ← 横移動の単位を10pxに
-  const blocks = [];
-  let currentPlayer = 1;
-  const scores = {1: 0, 2: 0};
-  let scrollY = 0;
+space = pymunk.Space()
+space.gravity = (0, 300)
 
-  const kanjiTypes = [
-    { char: '友', score: 1, effect: 'normal' },
-    { char: '朋', score: 2, effect: 'sticky' },
-    { char: '親', score: 3, effect: 'stable' },
-    { char: '知', score: 0.5, effect: 'fast' }
-  ];
+# --- 床 ---
+floor = pymunk.Segment(space.static_body, (50, 580), (350, 580), 10)
+floor.friction = 1.0
+space.add(floor)
 
-  function getRandomKanji() {
-    return kanjiTypes[Math.floor(Math.random() * kanjiTypes.length)];
-  }
+# --- プレイヤー画像とプロパティ読み込み ---
+image_folder = os.path.join(os.getcwd(), "images", "fontsize_64")
+players = []
+for filename in sorted(os.listdir(image_folder)):
+    if filename.endswith(".png"):
+        img = pygame.image.load(os.path.join(image_folder, filename)).convert_alpha()
+        if "red" in filename:
+            players.append({"name": "Red", "image": img, "mass": 2, "color": (255, 0, 0)})
+        elif "blue" in filename:
+            players.append({"name": "Blue", "image": img, "mass": 1, "color": (0, 0, 255)})
 
-  let block = createNewBlock();
+turn = 0  # 0:Red, 1:Blue
+counters = [0, 0]  # プレイヤーごとの積み数
 
-  function createNewBlock() {
-    const type = getRandomKanji();
-    return {
-      x: 120,
-      y: 0,
-      angle: 0,
-      char: type.char,
-      score: type.score,
-      effect: type.effect,
-      player: currentPlayer
-    };
-  }
+# --- ブロッククラス ---
+class FriendBlock:
+    def __init__(self, x, player):
+        self.original_image = player["image"]
 
-  function drawBlock(b) {
-    ctx.save();
-    ctx.translate(b.x + gridSize/2, b.y + gridSize/2);
-    ctx.rotate(b.angle * Math.PI / 180);
-    ctx.font = gridSize + "px serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillStyle = b.player === 1 ? "blue" : "red";
-    ctx.fillText(b.char, 0, 0);
-    ctx.restore();
-  }
+        # ランダムにスケーリング倍率を選択（5種類）
+        self.scale_factor = random.choice([0.5, 0.75, 1.0, 1.25, 1.5])
 
-  function drawAll() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.save();
-    ctx.translate(0, scrollY);
+        # スケーリング処理
+        orig_w = self.original_image.get_width()
+        orig_h = self.original_image.get_height()
+        self.width = int(orig_w * self.scale_factor)
+        self.height = int(orig_h * self.scale_factor)
+        self.image = pygame.transform.smoothscale(self.original_image, (self.width, self.height))
 
-    for (const b of blocks) {
-      drawBlock(b);
-    }
-    drawBlock(block);
+        # pymunk 計算
+        mass = player["mass"] * self.scale_factor  # 重さにも影響させるとリアル
+        moment = pymunk.moment_for_box(mass, (self.width, self.height))
 
-    ctx.restore();
-  }
+        self.body = pymunk.Body(mass, moment)
+        self.body.position = x, 50
 
-  function getLandingY(x) {
-    // X位置が近いブロックを検出（誤差対応）
-    const sameXBlocks = blocks.filter(b => Math.abs(b.x - x) < gridSize / 2);
-    if (sameXBlocks.length === 0) return canvas.height - gridSize;
-    const ys = sameXBlocks.map(b => b.y);
-    const minY = Math.min(...ys);
-    return minY - gridSize;
-  }
+        self.shape = pymunk.Poly.create_box(self.body, size=(self.width, self.height))
+        self.shape.friction = 0.9
+        self.shape.elasticity = 0.2
+        pymunk_space = pymunk.Space()
+        space.add(self.body, self.shape)
 
-  function gameLoop() {
-    const landingY = getLandingY(block.x);
-    const speed = block.effect === 'fast' ? 5 : 2;
-    block.y += speed;
+        self.player_index = turn  # どっちのプレイヤーが落としたか記録
 
-    if (block.y >= landingY) {
-      block.y = landingY;
-      blocks.push({...block});
-      scores[block.player] += block.score;
-      updateScores();
+    def draw(self):
+        x, y = self.body.position
+        rect = self.image.get_rect(center=(x, y))
+        screen.blit(self.image, rect)
 
-      if (checkCollapse()) {
-        triggerCollapse();
-        return;
-      }
+    def is_out_of_bounds(self):
+        _, y = self.body.position
+        return y > 600
 
-      switchPlayer();
-      block = createNewBlock();
-    }
+# --- ゲーム用リスト ---
+friends = []
+game_over = False
+winner = None
 
-    // スクロール調整
-    const minY = Math.min(...blocks.map(b => b.y), block.y);
-    scrollY = Math.min(0, canvas.height - minY - 200);
+# --- メインループ ---
+while True:
+    screen.fill((255, 255, 255))
 
-    drawAll();
-    requestAnimationFrame(gameLoop);
-  }
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            pygame.quit()
+            exit()
 
-  function checkCollapse() {
-    const topBlocks = blocks.filter(b => b.y < 120);
-    if (topBlocks.length < 2) return false;
+        # ゲームオーバー時の再スタート
+        if game_over and event.type == pygame.KEYDOWN and event.key == pygame.K_r:
+            friends.clear()
+            counters = [0, 0]
+            turn = 0
+            game_over = False
+            winner = None
 
-    const avgX = topBlocks.reduce((sum, b) => sum + b.x, 0) / topBlocks.length;
-    const center = canvas.width / 2;
-    const height = canvas.height - Math.min(...blocks.map(b => b.y));
+            # --- spaceを新しく作り直す ---
+            space = pymunk.Space()
+            space.gravity = (0, 300)
 
-    return height > 180 && Math.abs(avgX - center) > 60;
-  }
+            # 床を再登録
+            floor = pymunk.Segment(space.static_body, (50, 580), (350, 580), 10)
+            floor.friction = 1.0
+            space.add(floor)
 
-  function triggerCollapse() {
-    let frame = 0;
-    const interval = setInterval(() => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.save();
-      ctx.translate(0, scrollY);
+        # 通常プレイ時のクリック
+        if not game_over and event.type == pygame.MOUSEBUTTONDOWN:
+            x = pygame.mouse.get_pos()[0]
+            player = players[turn]
+            block = FriendBlock(x, player)
+            friends.append(block)
+            counters[turn] += 1
+            turn = (turn + 1) % 2
 
-      blocks.forEach(b => {
-        b.y += 10 + Math.random() * 5;
-        b.x += (Math.random() < 0.5 ? -1 : 1) * 5;
-        drawBlock(b);
-      });
+    if not game_over:
+        space.step(1 / 60.0)
 
-      ctx.restore();
-      frame++;
-      if (frame > 30) {
-        clearInterval(interval);
-        showCollapseMessage();
-      }
-    }, 50);
-  }
+        # 崩れチェック
+        for block in friends:
+            if block.is_out_of_bounds():
+                game_over = True
+                winner = 1 - block.player_index  # 相手の勝ち
+                break
 
-  function showCollapseMessage() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.font = "24px sans-serif";
-    ctx.fillStyle = "black";
-    ctx.textAlign = "center";
-    ctx.fillText("友情が崩壊しました…", canvas.width / 2, canvas.height / 2);
+    # --- 描画 ---
+    for block in friends:
+        block.draw()
 
-    setTimeout(() => {
-      location.reload();
-    }, 2000);
-  }
+    # 床
+    pygame.draw.line(screen, (0, 0, 0), (50, 580), (350, 580), 3)
 
-  function switchPlayer() {
-    currentPlayer = currentPlayer === 1 ? 2 : 1;
-    document.getElementById('currentPlayer').innerText = currentPlayer;
-  }
+    # ターン表示
+    font = pygame.font.SysFont(None, 28)
+    if not game_over:
+        turn_text = font.render(f"Turn: {players[turn]['name']}", True, (0, 0, 0))
+        screen.blit(turn_text, (10, 10))
 
-  function updateScores() {
-    document.getElementById('score1').innerText = scores[1];
-    document.getElementById('score2').innerText = scores[2];
-  }
+    # スコア表示
+    for i, player in enumerate(players):
+        count_text = font.render(f"{player['name']} Count: {counters[i]}", True, player["color"])
+        screen.blit(count_text, (10, 40 + i * 30))
 
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowLeft' && block.x >= moveStep) block.x -= moveStep;
-    if (e.key === 'ArrowRight' && block.x + gridSize + moveStep <= canvas.width) block.x += moveStep;
-    if (e.key === 'ArrowUp') block.angle = (block.angle + 90) % 360;
-    if (e.key === 'ArrowDown') block.y += gridSize;
-  });
+    # ゲームオーバー表示
+    if game_over:
+        winner_text = font.render(f"{players[winner]['name']} wins!", True, (0, 128, 0))
+        screen.blit(winner_text, (100, 250))
+        restart_text = font.render("Press R to restart", True, (0, 0, 0))
+        screen.blit(restart_text, (100, 280))
 
-  gameLoop();
-</script>
-'''))
+    pygame.display.flip()
+    clock.tick(60)
